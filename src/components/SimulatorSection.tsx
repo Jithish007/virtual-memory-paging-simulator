@@ -9,129 +9,98 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Play, RotateCcw, Upload, FileText } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 
-type Algorithm = "FIFO" | "LRU" | "OPT";
-
-interface PageState {
-  pageNumber: number;
-  status: "loaded" | "replaced" | "idle";
-  inMemory: boolean;
-}
+type Algorithm = "FIFO" | "LRU";
 
 interface MemoryFrame {
   frameNumber: number;
   pageNumber: number | null;
-  justLoaded: boolean;
+  isNew: boolean;
+  isReplacing: boolean;
 }
 
 interface SimulationStep {
+  stepNumber: number;
   pageRequest: number;
   frames: MemoryFrame[];
   isFault: boolean;
   replacedPage: number | null;
+  replacedFrame: number | null;
+  message: string;
 }
 
 export default function SimulatorSection() {
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
-  const [fileSize, setFileSize] = useState<number>(0);
-  const [pageSize, setPageSize] = useState<string>("4096"); // Default 4KB
+  const [pageSequence, setPageSequence] = useState<number[]>([]);
   const [numFrames, setNumFrames] = useState<string>("3");
   const [algorithm, setAlgorithm] = useState<Algorithm>("FIFO");
-  const [totalPages, setTotalPages] = useState<number>(0);
-  const [pageStates, setPageStates] = useState<PageState[]>([]);
   const [simulationSteps, setSimulationSteps] = useState<SimulationStep[]>([]);
-  const [currentStep, setCurrentStep] = useState<number>(0);
+  const [currentStep, setCurrentStep] = useState<number>(-1);
   const [isSimulating, setIsSimulating] = useState(false);
   const [simulationComplete, setSimulationComplete] = useState(false);
-  const [stats, setStats] = useState({
-    totalPages: 0,
-    framesUsed: 0,
-    pageFaults: 0,
-    pageHits: 0,
-    hitRatio: 0,
-  });
+  const [totalFaults, setTotalFaults] = useState(0);
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
       setUploadedFile(file);
-      setFileSize(file.size);
       setSimulationComplete(false);
       setSimulationSteps([]);
-      setCurrentStep(0);
+      setCurrentStep(-1);
       
-      // Calculate number of pages
-      const pageSizeBytes = parseInt(pageSize);
-      const pages = Math.ceil(file.size / pageSizeBytes);
-      setTotalPages(pages);
+      // Read file content
+      const text = await file.text();
       
-      // Initialize page states
-      const initialPageStates: PageState[] = Array.from({ length: pages }, (_, i) => ({
-        pageNumber: i,
-        status: "idle",
-        inMemory: false,
-      }));
-      setPageStates(initialPageStates);
+      // Parse page numbers from text (supports space, comma, newline separated)
+      const numbers = text
+        .replace(/[,\n\r\t]+/g, ' ')
+        .trim()
+        .split(/\s+/)
+        .map(num => parseInt(num.trim()))
+        .filter(num => !isNaN(num) && num >= 0);
+      
+      setPageSequence(numbers);
     }
   };
 
-  const generatePageAccessSequence = (totalPages: number): number[] => {
-    // Simulate realistic page access pattern: sequential with some locality
-    const sequence: number[] = [];
-    const accessCount = Math.min(totalPages * 2, 50); // Limit to 50 accesses for visualization
-    
-    // Start with sequential access
-    for (let i = 0; i < Math.min(totalPages, 10); i++) {
-      sequence.push(i);
-    }
-    
-    // Add some random accesses with locality
-    for (let i = sequence.length; i < accessCount; i++) {
-      if (Math.random() < 0.7 && sequence.length > 0) {
-        // 70% chance to access nearby page (locality)
-        const lastPage = sequence[sequence.length - 1];
-        const offset = Math.floor(Math.random() * 5) - 2;
-        const nextPage = Math.max(0, Math.min(totalPages - 1, lastPage + offset));
-        sequence.push(nextPage);
-      } else {
-        // 30% chance to access random page
-        sequence.push(Math.floor(Math.random() * totalPages));
-      }
-    }
-    
-    return sequence;
-  };
-
-  const runPageReplacement = (frames: number, pageSequence: number[], algo: Algorithm) => {
+  const runPageReplacement = (frames: number, pageSeq: number[], algo: Algorithm) => {
     const memory: (number | null)[] = Array(frames).fill(null);
     const steps: SimulationStep[] = [];
     let pageFaults = 0;
-    let pageHits = 0;
     let fifoQueue: number[] = [];
     const lastUsed: Map<number, number> = new Map();
 
-    pageSequence.forEach((page, time) => {
+    pageSeq.forEach((page, time) => {
       const isInMemory = memory.includes(page);
       let replacedPage: number | null = null;
+      let replacedFrame: number | null = null;
+      let message = "";
 
       if (isInMemory) {
-        pageHits++;
+        // Page Hit
         if (algo === "LRU") {
           lastUsed.set(page, time);
         }
         
-        const frames: MemoryFrame[] = memory.map((p, idx) => ({
+        message = `Page ${page} is already in memory - Page Hit!`;
+        
+        const framesCopy: MemoryFrame[] = memory.map((p, idx) => ({
           frameNumber: idx,
           pageNumber: p,
-          justLoaded: false,
+          isNew: false,
+          isReplacing: false,
         }));
         
         steps.push({
+          stepNumber: time + 1,
           pageRequest: page,
-          frames,
+          frames: framesCopy,
           isFault: false,
           replacedPage: null,
+          replacedFrame: null,
+          message,
         });
       } else {
+        // Page Fault
         pageFaults++;
         
         if (memory.includes(null)) {
@@ -145,6 +114,8 @@ export default function SimulatorSection() {
           if (algo === "LRU") {
             lastUsed.set(page, time);
           }
+          
+          message = `Page ${page} loaded into Frame ${emptyIndex} - Page Fault`;
         } else {
           // Need to replace
           let replaceIndex = 0;
@@ -154,6 +125,7 @@ export default function SimulatorSection() {
               const pageToReplace = fifoQueue.shift()!;
               replaceIndex = memory.indexOf(pageToReplace);
               replacedPage = pageToReplace;
+              replacedFrame = replaceIndex;
               fifoQueue.push(page);
               break;
               
@@ -173,137 +145,74 @@ export default function SimulatorSection() {
               
               replaceIndex = memory.indexOf(lruPage);
               replacedPage = lruPage;
+              replacedFrame = replaceIndex;
               lastUsed.set(page, time);
-              break;
-              
-            case "OPT":
-              let farthestIndex = -1;
-              let pageToReplaceOpt = memory[0]!;
-              
-              memory.forEach((p) => {
-                if (p !== null) {
-                  const nextUse = pageSequence.slice(time + 1).indexOf(p);
-                  const futureIndex = nextUse === -1 ? Infinity : time + 1 + nextUse;
-                  
-                  if (futureIndex > farthestIndex) {
-                    farthestIndex = futureIndex;
-                    pageToReplaceOpt = p;
-                  }
-                }
-              });
-              
-              replaceIndex = memory.indexOf(pageToReplaceOpt);
-              replacedPage = pageToReplaceOpt;
               break;
           }
           
           memory[replaceIndex] = page;
+          message = `Page ${page} replaced Page ${replacedPage} in Frame ${replacedFrame} - Page Fault`;
         }
         
-        const frames: MemoryFrame[] = memory.map((p, idx) => ({
+        const framesCopy: MemoryFrame[] = memory.map((p, idx) => ({
           frameNumber: idx,
           pageNumber: p,
-          justLoaded: p === page,
+          isNew: p === page,
+          isReplacing: idx === replacedFrame,
         }));
         
         steps.push({
+          stepNumber: time + 1,
           pageRequest: page,
-          frames,
+          frames: framesCopy,
           isFault: true,
           replacedPage,
+          replacedFrame,
+          message,
         });
       }
     });
 
-    const framesUsed = memory.filter((f) => f !== null).length;
-    const hitRatio = ((pageHits / pageSequence.length) * 100).toFixed(2);
-
-    return {
-      steps,
-      stats: {
-        totalPages: Math.max(...pageSequence) + 1,
-        framesUsed,
-        pageFaults,
-        pageHits,
-        hitRatio: parseFloat(hitRatio),
-      },
-    };
+    return { steps, totalFaults: pageFaults };
   };
 
   const handleSimulation = () => {
-    if (!uploadedFile) {
-      alert("Please upload a file first!");
+    if (!uploadedFile || pageSequence.length === 0) {
+      alert("Please upload a valid file with page reference numbers!");
       return;
     }
 
     setIsSimulating(true);
     setSimulationComplete(false);
-    setCurrentStep(0);
+    setCurrentStep(-1);
 
-    setTimeout(() => {
-      const frames = parseInt(numFrames);
-      const pageSequence = generatePageAccessSequence(totalPages);
-      const result = runPageReplacement(frames, pageSequence, algorithm);
+    const frames = parseInt(numFrames);
+    const result = runPageReplacement(frames, pageSequence, algorithm);
 
-      setSimulationSteps(result.steps);
-      setStats(result.stats);
-      
-      // Animate through steps
-      let step = 0;
-      const interval = setInterval(() => {
-        if (step < result.steps.length) {
-          setCurrentStep(step);
-          
-          // Update page states
-          const currentStepData = result.steps[step];
-          setPageStates((prev) =>
-            prev.map((ps) => {
-              const inMemory = currentStepData.frames.some((f) => f.pageNumber === ps.pageNumber);
-              let status: "loaded" | "replaced" | "idle" = "idle";
-              
-              if (currentStepData.pageRequest === ps.pageNumber && currentStepData.isFault) {
-                status = "loaded";
-              } else if (currentStepData.replacedPage === ps.pageNumber) {
-                status = "replaced";
-              } else if (inMemory) {
-                status = "loaded";
-              }
-              
-              return { ...ps, status, inMemory };
-            })
-          );
-          
-          step++;
-        } else {
-          clearInterval(interval);
-          setSimulationComplete(true);
-          setIsSimulating(false);
-        }
-      }, 400);
-    }, 500);
+    setSimulationSteps(result.steps);
+    setTotalFaults(result.totalFaults);
+    
+    // Animate through steps
+    let step = 0;
+    const interval = setInterval(() => {
+      if (step < result.steps.length) {
+        setCurrentStep(step);
+        step++;
+      } else {
+        clearInterval(interval);
+        setSimulationComplete(true);
+        setIsSimulating(false);
+      }
+    }, 1500); // 1.5 seconds per step
   };
 
   const handleReset = () => {
     setUploadedFile(null);
-    setFileSize(0);
-    setTotalPages(0);
-    setPageStates([]);
+    setPageSequence([]);
     setSimulationSteps([]);
-    setCurrentStep(0);
+    setCurrentStep(-1);
     setSimulationComplete(false);
-    setStats({
-      totalPages: 0,
-      framesUsed: 0,
-      pageFaults: 0,
-      pageHits: 0,
-      hitRatio: 0,
-    });
-  };
-
-  const formatFileSize = (bytes: number): string => {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(2)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+    setTotalFaults(0);
   };
 
   return (
@@ -311,19 +220,19 @@ export default function SimulatorSection() {
       <div className="max-w-7xl mx-auto">
         <div className="text-center mb-12">
           <h2 className="text-4xl sm:text-5xl font-bold mb-4 bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">
-            File-Based Paging Simulator
+            Virtual Memory and Paging Simulator
           </h2>
           <p className="text-lg text-muted-foreground max-w-2xl mx-auto">
-            Upload a file and visualize how virtual memory paging works with real file data
+            Upload a text file with page reference numbers and watch the paging process step by step
           </p>
         </div>
 
         {/* File Upload Section */}
-        <Card className="mb-8">
+        <Card className="mb-8 shadow-lg">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Upload className="h-5 w-5" />
-              Upload File
+              Upload Page Reference File
             </CardTitle>
           </CardHeader>
           <CardContent>
@@ -333,7 +242,7 @@ export default function SimulatorSection() {
                   type="file"
                   onChange={handleFileUpload}
                   className="flex-1"
-                  accept="*/*"
+                  accept=".txt,text/plain"
                 />
                 {uploadedFile && (
                   <Badge variant="secondary" className="flex items-center gap-2">
@@ -343,20 +252,23 @@ export default function SimulatorSection() {
                 )}
               </div>
               
-              {uploadedFile && (
-                <div className="grid grid-cols-2 md:grid-cols-3 gap-4 p-4 bg-primary/5 rounded-lg">
-                  <div>
-                    <p className="text-sm text-muted-foreground">File Size</p>
-                    <p className="text-lg font-semibold">{formatFileSize(fileSize)}</p>
+              <p className="text-sm text-muted-foreground">
+                Upload a text file containing page reference numbers (e.g., "3 4 2 3 1 4 3" or "7,0,1,2,0,3,0,4")
+              </p>
+              
+              {pageSequence.length > 0 && (
+                <div className="p-4 bg-primary/5 rounded-lg border-2 border-primary/20">
+                  <p className="text-sm text-muted-foreground mb-2">Page Reference Sequence:</p>
+                  <div className="flex flex-wrap gap-2">
+                    {pageSequence.map((page, idx) => (
+                      <Badge key={idx} variant="outline" className="text-base px-3 py-1">
+                        {page}
+                      </Badge>
+                    ))}
                   </div>
-                  <div>
-                    <p className="text-sm text-muted-foreground">Total Pages</p>
-                    <p className="text-lg font-semibold">{totalPages}</p>
-                  </div>
-                  <div>
-                    <p className="text-sm text-muted-foreground">Page Size</p>
-                    <p className="text-lg font-semibold">{formatFileSize(parseInt(pageSize))}</p>
-                  </div>
+                  <p className="text-sm text-muted-foreground mt-3">
+                    Total References: <span className="font-semibold">{pageSequence.length}</span>
+                  </p>
                 </div>
               )}
             </div>
@@ -364,43 +276,12 @@ export default function SimulatorSection() {
         </Card>
 
         {/* Configuration */}
-        <Card className="mb-8">
+        <Card className="mb-8 shadow-lg">
           <CardHeader>
-            <CardTitle>Simulation Configuration</CardTitle>
+            <CardTitle>Simulation Settings</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              <div className="space-y-2">
-                <Label htmlFor="pageSize">Page Size</Label>
-                <Select
-                  value={pageSize}
-                  onValueChange={(value) => {
-                    setPageSize(value);
-                    if (uploadedFile) {
-                      const pages = Math.ceil(fileSize / parseInt(value));
-                      setTotalPages(pages);
-                      const initialPageStates: PageState[] = Array.from({ length: pages }, (_, i) => ({
-                        pageNumber: i,
-                        status: "idle",
-                        inMemory: false,
-                      }));
-                      setPageStates(initialPageStates);
-                    }
-                  }}
-                >
-                  <SelectTrigger id="pageSize">
-                    <SelectValue placeholder="Select page size" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="1024">1 KB</SelectItem>
-                    <SelectItem value="2048">2 KB</SelectItem>
-                    <SelectItem value="4096">4 KB</SelectItem>
-                    <SelectItem value="8192">8 KB</SelectItem>
-                    <SelectItem value="16384">16 KB</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="space-y-2">
                 <Label htmlFor="frames">Number of Memory Frames</Label>
                 <Input
@@ -423,7 +304,6 @@ export default function SimulatorSection() {
                   <SelectContent>
                     <SelectItem value="FIFO">FIFO (First-In-First-Out)</SelectItem>
                     <SelectItem value="LRU">LRU (Least Recently Used)</SelectItem>
-                    <SelectItem value="OPT">Optimal</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -432,13 +312,14 @@ export default function SimulatorSection() {
             <div className="flex gap-4 mt-6">
               <Button
                 onClick={handleSimulation}
-                disabled={!uploadedFile || isSimulating}
+                disabled={!uploadedFile || pageSequence.length === 0 || isSimulating}
                 className="bg-primary hover:bg-primary/90"
+                size="lg"
               >
                 <Play className="mr-2 h-4 w-4" />
-                {isSimulating ? "Simulating..." : "Run Simulation"}
+                {isSimulating ? "Running Simulation..." : "Start Simulation"}
               </Button>
-              <Button onClick={handleReset} variant="outline">
+              <Button onClick={handleReset} variant="outline" size="lg">
                 <RotateCcw className="mr-2 h-4 w-4" />
                 Reset
               </Button>
@@ -446,116 +327,96 @@ export default function SimulatorSection() {
           </CardContent>
         </Card>
 
-        {/* Page Visualization */}
-        {pageStates.length > 0 && (
-          <Card className="mb-8">
+        {/* Simulation Visualization */}
+        {currentStep >= 0 && simulationSteps[currentStep] && (
+          <Card className="mb-8 shadow-xl border-2 border-primary/30">
             <CardHeader>
-              <CardTitle>Page Visualization</CardTitle>
-              <p className="text-sm text-muted-foreground mt-2">
-                Green = Loaded in Memory | Red = Replaced | Gray = Not in Memory
-              </p>
-            </CardHeader>
-            <CardContent>
-              <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 lg:grid-cols-10 gap-3">
-                {pageStates.slice(0, 50).map((page) => (
-                  <div
-                    key={page.pageNumber}
-                    className={`
-                      relative rounded-lg p-3 text-center font-semibold text-sm transition-all duration-500 transform
-                      ${page.status === "loaded" ? "bg-green-500 text-white scale-110 shadow-lg" : ""}
-                      ${page.status === "replaced" ? "bg-red-500 text-white scale-90" : ""}
-                      ${page.status === "idle" && page.inMemory ? "bg-blue-500/20 border-2 border-blue-500" : ""}
-                      ${page.status === "idle" && !page.inMemory ? "bg-muted text-muted-foreground" : ""}
-                    `}
-                  >
-                    <div className="text-xs opacity-70">Page</div>
-                    <div className="text-lg font-bold">{page.pageNumber}</div>
-                  </div>
-                ))}
-              </div>
-              {pageStates.length > 50 && (
-                <p className="text-sm text-muted-foreground mt-4 text-center">
-                  Showing first 50 pages of {pageStates.length} total pages
-                </p>
-              )}
-            </CardContent>
-          </Card>
-        )}
-
-        {/* Memory Frames Visualization */}
-        {simulationSteps.length > 0 && currentStep < simulationSteps.length && (
-          <Card className="mb-8">
-            <CardHeader>
-              <CardTitle>Memory Frames (Step {currentStep + 1} of {simulationSteps.length})</CardTitle>
-              <p className="text-sm text-muted-foreground mt-2">
-                Current Page Request: <span className="font-bold text-primary">Page {simulationSteps[currentStep].pageRequest}</span>
-                {" - "}
-                <Badge variant={simulationSteps[currentStep].isFault ? "destructive" : "default"}>
+              <div className="flex items-center justify-between flex-wrap gap-4">
+                <CardTitle className="text-2xl">
+                  Step {simulationSteps[currentStep].stepNumber} of {simulationSteps.length}
+                </CardTitle>
+                <Badge 
+                  variant={simulationSteps[currentStep].isFault ? "destructive" : "default"}
+                  className="text-base px-4 py-2"
+                >
                   {simulationSteps[currentStep].isFault ? "PAGE FAULT" : "PAGE HIT"}
                 </Badge>
+              </div>
+              <p className="text-lg mt-3">
+                Requesting Page: <span className="font-bold text-primary text-2xl">{simulationSteps[currentStep].pageRequest}</span>
               </p>
             </CardHeader>
-            <CardContent>
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
-                {simulationSteps[currentStep].frames.map((frame) => (
-                  <div
-                    key={frame.frameNumber}
-                    className={`
-                      relative rounded-lg p-6 text-center border-4 transition-all duration-500 transform
-                      ${frame.justLoaded ? "bg-green-500/20 border-green-500 scale-110 shadow-xl" : "bg-primary/10 border-primary/30"}
-                    `}
-                  >
-                    <div className="text-xs text-muted-foreground mb-2">Frame {frame.frameNumber}</div>
-                    <div className="text-3xl font-bold">
-                      {frame.pageNumber !== null ? frame.pageNumber : "-"}
-                    </div>
-                    {frame.justLoaded && (
-                      <div className="absolute -top-2 -right-2 bg-green-500 text-white text-xs px-2 py-1 rounded-full">
-                        NEW
+            <CardContent className="space-y-6">
+              {/* Memory Frames */}
+              <div>
+                <h3 className="text-lg font-semibold mb-4">Memory Frames:</h3>
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+                  {simulationSteps[currentStep].frames.map((frame) => (
+                    <div
+                      key={frame.frameNumber}
+                      className={`
+                        relative rounded-xl p-6 text-center border-4 transition-all duration-700 transform
+                        ${frame.isNew ? "bg-green-500/20 border-green-500 scale-110 shadow-2xl animate-in fade-in zoom-in" : ""}
+                        ${frame.isReplacing && !frame.isNew ? "bg-red-500/20 border-red-500 animate-out fade-out zoom-out" : ""}
+                        ${!frame.isNew && !frame.isReplacing && frame.pageNumber !== null ? "bg-blue-500/10 border-blue-500/50" : ""}
+                        ${frame.pageNumber === null ? "bg-muted border-muted-foreground/20" : ""}
+                      `}
+                    >
+                      <div className="text-xs text-muted-foreground mb-2 font-medium">
+                        Frame {frame.frameNumber}
                       </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-              {simulationSteps[currentStep].replacedPage !== null && (
-                <div className="mt-4 p-3 bg-red-500/10 border-2 border-red-500/30 rounded-lg text-center">
-                  <span className="text-sm font-semibold text-red-600">
-                    Replaced Page: {simulationSteps[currentStep].replacedPage}
-                  </span>
+                      <div className="text-4xl font-bold">
+                        {frame.pageNumber !== null ? frame.pageNumber : "—"}
+                      </div>
+                      {frame.isNew && (
+                        <div className="absolute -top-2 -right-2 bg-green-600 text-white text-xs px-3 py-1 rounded-full font-semibold shadow-lg animate-bounce">
+                          NEW
+                        </div>
+                      )}
+                    </div>
+                  ))}
                 </div>
-              )}
+              </div>
+
+              {/* Status Message */}
+              <div className={`
+                p-4 rounded-lg border-2 text-center font-medium text-lg
+                ${simulationSteps[currentStep].isFault ? "bg-red-500/10 border-red-500/50 text-red-700" : "bg-green-500/10 border-green-500/50 text-green-700"}
+              `}>
+                {simulationSteps[currentStep].message}
+              </div>
             </CardContent>
           </Card>
         )}
 
-        {/* Final Statistics */}
+        {/* Final Results */}
         {simulationComplete && (
-          <Card className="bg-gradient-to-br from-primary/5 to-accent/5 border-2 border-primary/30">
+          <Card className="bg-gradient-to-br from-primary/10 to-accent/10 border-2 border-primary/50 shadow-2xl">
             <CardHeader>
-              <CardTitle className="text-2xl">Simulation Results</CardTitle>
+              <CardTitle className="text-3xl text-center">Simulation Complete! 🎉</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="grid grid-cols-2 md:grid-cols-5 gap-6">
-                <div className="text-center p-4 bg-background rounded-lg">
-                  <p className="text-sm text-muted-foreground mb-2">Total Pages</p>
-                  <p className="text-3xl font-bold text-primary">{stats.totalPages}</p>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div className="text-center p-6 bg-background rounded-xl shadow-md">
+                  <p className="text-sm text-muted-foreground mb-2">Total Page References</p>
+                  <p className="text-5xl font-bold text-primary">{pageSequence.length}</p>
                 </div>
-                <div className="text-center p-4 bg-background rounded-lg">
-                  <p className="text-sm text-muted-foreground mb-2">Frames Used</p>
-                  <p className="text-3xl font-bold text-blue-600">{stats.framesUsed}</p>
+                <div className="text-center p-6 bg-background rounded-xl shadow-md">
+                  <p className="text-sm text-muted-foreground mb-2">Total Page Faults</p>
+                  <p className="text-5xl font-bold text-red-600">{totalFaults}</p>
                 </div>
-                <div className="text-center p-4 bg-background rounded-lg">
-                  <p className="text-sm text-muted-foreground mb-2">Page Faults</p>
-                  <p className="text-3xl font-bold text-red-600">{stats.pageFaults}</p>
-                </div>
-                <div className="text-center p-4 bg-background rounded-lg">
+                <div className="text-center p-6 bg-background rounded-xl shadow-md">
                   <p className="text-sm text-muted-foreground mb-2">Page Hits</p>
-                  <p className="text-3xl font-bold text-green-600">{stats.pageHits}</p>
+                  <p className="text-5xl font-bold text-green-600">{pageSequence.length - totalFaults}</p>
                 </div>
-                <div className="text-center p-4 bg-background rounded-lg">
-                  <p className="text-sm text-muted-foreground mb-2">Hit Ratio</p>
-                  <p className="text-3xl font-bold text-accent">{stats.hitRatio}%</p>
-                </div>
+              </div>
+              
+              <div className="mt-6 text-center p-4 bg-background/50 rounded-lg">
+                <p className="text-lg">
+                  Algorithm Used: <span className="font-bold text-primary">{algorithm}</span>
+                  {" | "}
+                  Hit Ratio: <span className="font-bold text-accent">{((pageSequence.length - totalFaults) / pageSequence.length * 100).toFixed(2)}%</span>
+                </p>
               </div>
             </CardContent>
           </Card>
